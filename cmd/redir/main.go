@@ -31,22 +31,6 @@ func (cfg *config) dialer() dialerFunc {
 	}
 }
 
-type multicloseListener struct {
-	net.Listener
-	closeErr error
-	closed   bool
-}
-
-func (m *multicloseListener) Close() error {
-	if m.closed {
-		return m.closeErr
-	}
-	m.closed = true
-
-	m.closeErr = m.Listener.Close()
-	return m.closeErr
-}
-
 func rootContext(ctx context.Context, logger *slog.Logger) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -65,14 +49,14 @@ func rootContext(ctx context.Context, logger *slog.Logger) (context.Context, con
 			//
 			// Technically a process may try to kill itself, but the normal thing is for the
 			// context cancel func to be used for that case.
-			logger.WarnContext(ctx,
+			logger.LogAttrs(ctx, slog.LevelWarn,
 				"shutdown requested",
 				slog.String("signaler", "process"),
 			)
 		case <-ctxChan:
 			// The context has either been cancelled due to a failure, expired due to a timeout
 			// deadline being reached, or has naturally/gracefully come to its expected end.
-			logger.WarnContext(ctx,
+			logger.LogAttrs(ctx, slog.LevelWarn,
 				"shutdown requested",
 				slog.String("signaler", "context"),
 				errAttr(ctx.Err()),
@@ -202,13 +186,15 @@ func main() {
 
 	cfg := newConfig()
 
-	logger.InfoContext(ctx,
+	dialer := cfg.dialer()
+
+	logger.LogAttrs(ctx, slog.LevelInfo,
 		"starting listener",
 		slog.String("addr", cfg.addr),
 	)
 
 	defer func() {
-		logger.WarnContext(ctx,
+		logger.LogAttrs(ctx, slog.LevelWarn,
 			"stopped",
 		)
 	}()
@@ -217,36 +203,47 @@ func main() {
 	{
 		v, err := net.Listen(cfg.net, cfg.addr)
 		if err != nil {
-			logger.ErrorContext(ctx,
+			logger.LogAttrs(ctx, slog.LevelError,
 				"failed to start listener",
 				errAttr(err),
 			)
 			panic(err)
 		}
-		listener = &multicloseListener{Listener: v}
+		listener = v
 	}
-	defer func() {
-		if err := listener.Close(); err != nil {
-			logger.ErrorContext(ctx,
-				"failed to gracefully close listener",
-				errAttr(err),
-			)
-		}
-	}()
-
-	dialer := cfg.dialer()
 
 	serve(ctx, logger, listener, dialer)
 }
 
-// serve starts goroutines to handle requests coming in to the listener.
-//
-// The caller should expect serve to take over the responsibility of closing the listener unless a panic
-// occurs. It's probably best that the caller defer closing the listener and ensure the listener can have
-// its close method called more than once.
-func serve(ctx context.Context, logger *slog.Logger, listener net.Listener, dialer dialerFunc) {
+func closeConnFunc(con net.Conn) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			ignoredErr := con.Close()
+			_ = ignoredErr
+		})
+	}
+}
 
-	logger.InfoContext(ctx,
+func closeListenerFunc(listener net.Listener) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			ignoredErr := listener.Close()
+			_ = ignoredErr
+		})
+	}
+}
+
+// serve starts goroutines to handle requests coming in to the listener.
+func serve(ctx context.Context, logger *slog.Logger, listener net.Listener, dialer dialerFunc) {
+	closeListener := closeListenerFunc(listener)
+	defer closeListener()
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	logger.LogAttrs(ctx, slog.LevelInfo,
 		"starting handlers",
 		slog.String("addr", listener.Addr().String()),
 	)
@@ -255,90 +252,106 @@ func serve(ctx context.Context, logger *slog.Logger, listener net.Listener, dial
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		// if this routine ever explodes, then all child contexts must terminate
+		defer cancel()
 
 		ctxChan := ctx.Done()
 
-		for {
-			con, err := listener.Accept()
-			if err != nil {
-				if errors.Is(err, net.ErrClosed) && done(ctxChan) {
+		next := func() bool {
+			var con net.Conn
+			var err error
+			var closeFrom func()
+
+			defer func() {
+				if r := recover(); r == nil {
 					return
 				}
 
-				logger.DebugContext(ctx,
+				const errMsg = "failed to start handler"
+
+				if closeFrom == nil {
+					if con == nil {
+						return
+					}
+
+					attrs := make([]slog.Attr, 1, 2)
+					attrs[0] = slog.String("remediation_performed", "closed socket")
+					if err := con.Close(); err != nil {
+						attrs = append(attrs, slog.Any("close_error", err))
+					}
+
+					logger.LogAttrs(ctx, slog.LevelError,
+						errMsg,
+						attrs...,
+					)
+
+					return
+				}
+
+				logger.LogAttrs(ctx, slog.LevelError,
+					errMsg,
+					slog.String("remediation_performed", "none"),
+				)
+
+				closeFrom()
+			}()
+
+			con, err = listener.Accept()
+			if err != nil {
+				if errors.Is(err, net.ErrClosed) && done(ctxChan) {
+					return false
+				}
+
+				logger.LogAttrs(ctx, slog.LevelDebug,
 					"error accepting",
 					errAttr(err),
 				)
 
-				continue
+				return true
 			}
+
+			closeFrom = closeConnFunc(con)
 
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				defer closeFrom()
 
-				if !handleCon(ctx, logger, dialer, con) {
-					if err := con.Close(); err != nil {
-						logger.ErrorContext(ctx,
-							"failed to close 'from' connection",
-							errAttr(err),
-							slog.String("from_remote_addr", addrToStr(con.RemoteAddr())),
-							slog.String("from_local_addr", addrToStr(con.LocalAddr())),
-						)
-					}
-				}
+				handleCon(ctx, logger, dialer, con, closeFrom)
 			}()
+
+			return true
+		}
+
+		for {
+			if !next() {
+				return
+			}
 		}
 	}()
 
 	defer wg.Wait()
+	defer closeListener()
 
 	<-ctx.Done()
 
-	logger.WarnContext(ctx,
+	logger.LogAttrs(ctx, slog.LevelWarn,
 		"stopping",
 	)
-
-	if err := listener.Close(); err != nil {
-		logger.ErrorContext(ctx,
-			"failed to close listener",
-			errAttr(err),
-		)
-		panic(err)
-	}
 }
 
-func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from net.Conn) bool {
+func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from net.Conn, closeFrom func()) {
+
 	to, err := dialer(ctx)
 	if err != nil {
-		logger.ErrorContext(ctx,
+		logger.LogAttrs(ctx, slog.LevelError,
 			"failed to dial",
 			errAttr(err),
 		)
-		return false
+		return
 	}
-
-	var closeFrom, closeTo func()
-	{
-		oncer := func(f func()) func() {
-			var once sync.Once
-			return func() {
-				once.Do(f)
-			}
-		}
-
-		closeFrom = oncer(func() {
-			ignoredErr := from.Close()
-			_ = ignoredErr
-		})
-
-		closeTo = oncer(func() {
-			ignoredErr := to.Close()
-			_ = ignoredErr
-		})
-	}
+	closeTo := closeConnFunc(to)
 	defer closeTo()
-	defer closeFrom()
 
 	fromChan := make(chan struct{})
 	go func() {
@@ -347,7 +360,7 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 
 		_, err := io.Copy(to, from)
 		if err != nil && logger.Enabled(ctx, slog.LevelDebug) {
-			logger.DebugContext(ctx,
+			logger.LogAttrs(ctx, slog.LevelDebug,
 				"copy errored",
 				errAttr(err),
 				slog.String("operation", "from -> to"),
@@ -364,7 +377,7 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 
 		_, err := io.Copy(from, to)
 		if err != nil && logger.Enabled(ctx, slog.LevelDebug) {
-			logger.DebugContext(ctx,
+			logger.LogAttrs(ctx, slog.LevelDebug,
 				"copy errored",
 				errAttr(err),
 				slog.String("operation", "from <- to"),
@@ -394,8 +407,6 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 		chans = chans[:1]
 	case <-ctxChan:
 	}
-
-	return true
 }
 
 func allowedNets() []string {
