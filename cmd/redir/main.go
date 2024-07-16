@@ -256,6 +256,8 @@ func serve(ctx context.Context, logger *slog.Logger, listener net.Listener, dial
 	go func() {
 		defer wg.Done()
 
+		ctxChan := ctx.Done()
+
 		for {
 			con, err := listener.Accept()
 			if err != nil {
@@ -316,53 +318,72 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 		return false
 	}
 
-	chan1 := make(chan struct{})
-	go func() {
-		defer close(chan1)
-
-		for {
-			if _, err := io.Copy(to, from); err != nil {
-				if logger.Enabled(ctx, slog.LevelDebug) {
-					logger.DebugContext(ctx,
-						"copy errored",
-						errAttr(err),
-						slog.String("operation", "from -> to"),
-						slog.String("from_remote_addr", addrToStr(from.RemoteAddr())),
-						slog.String("from_local_addr", addrToStr(from.LocalAddr())),
-					)
-				}
-				return
+	var closeFrom, closeTo func()
+	{
+		oncer := func(f func()) func() {
+			var once sync.Once
+			return func() {
+				once.Do(f)
 			}
+		}
+
+		closeFrom = oncer(func() {
+			ignoredErr := from.Close()
+			_ = ignoredErr
+		})
+
+		closeTo = oncer(func() {
+			ignoredErr := to.Close()
+			_ = ignoredErr
+		})
+	}
+	defer closeTo()
+	defer closeFrom()
+
+	fromChan := make(chan struct{})
+	go func() {
+		defer close(fromChan)
+		defer closeFrom()
+
+		_, err := io.Copy(to, from)
+		if err != nil && logger.Enabled(ctx, slog.LevelDebug) {
+			logger.DebugContext(ctx,
+				"copy errored",
+				errAttr(err),
+				slog.String("operation", "from -> to"),
+				slog.String("from_remote_addr", addrToStr(from.RemoteAddr())),
+				slog.String("from_local_addr", addrToStr(from.LocalAddr())),
+			)
 		}
 	}()
 
-	chan2 := make(chan struct{})
+	toChan := make(chan struct{})
 	go func() {
-		defer close(chan2)
+		defer close(toChan)
+		defer closeTo()
 
-		for {
-			if _, err := io.Copy(from, to); err != nil {
-				if logger.Enabled(ctx, slog.LevelDebug) {
-					logger.DebugContext(ctx,
-						"copy errored",
-						errAttr(err),
-						slog.String("operation", "from <- to"),
-						slog.String("from_remote_addr", addrToStr(from.RemoteAddr())),
-						slog.String("from_local_addr", addrToStr(from.LocalAddr())),
-					)
-				}
-				return
-			}
+		_, err := io.Copy(from, to)
+		if err != nil && logger.Enabled(ctx, slog.LevelDebug) {
+			logger.DebugContext(ctx,
+				"copy errored",
+				errAttr(err),
+				slog.String("operation", "from <- to"),
+				slog.String("from_remote_addr", addrToStr(from.RemoteAddr())),
+				slog.String("from_local_addr", addrToStr(from.LocalAddr())),
+			)
 		}
 	}()
 
-	chans := [](<-chan struct{}){chan1, chan2}
+	chans := [](<-chan struct{}){fromChan, toChan}
 
 	defer func() {
 		for _, v := range chans {
 			<-v
 		}
 	}()
+
+	defer closeTo()
+	defer closeFrom()
 
 	ctxChan := ctx.Done()
 
@@ -372,8 +393,6 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 	case <-chans[1]:
 		chans = chans[:1]
 	case <-ctxChan:
-		defer to.Close()
-		from.Close()
 	}
 
 	return true
