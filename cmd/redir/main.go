@@ -216,23 +216,17 @@ func main() {
 }
 
 func closeConnFunc(con net.Conn) func() {
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			ignoredErr := con.Close()
-			_ = ignoredErr
-		})
-	}
+	return sync.OnceFunc(func() {
+		ignoredErr := con.Close()
+		_ = ignoredErr
+	})
 }
 
 func closeListenerFunc(listener net.Listener) func() {
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			ignoredErr := listener.Close()
-			_ = ignoredErr
-		})
-	}
+	return sync.OnceFunc(func() {
+		ignoredErr := listener.Close()
+		_ = ignoredErr
+	})
 }
 
 // serve starts goroutines to handle requests coming in to the listener.
