@@ -317,10 +317,7 @@ func serve(ctx context.Context, logger *slog.Logger, listener net.Listener, dial
 			return true
 		}
 
-		for {
-			if !next() {
-				return
-			}
+		for next() {
 		}
 	}()
 
