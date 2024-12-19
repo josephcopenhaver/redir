@@ -68,13 +68,13 @@ func rootContext(ctx context.Context, logger *slog.Logger) (context.Context, con
 	return ctx, cancel
 }
 
-func newLogger() *slog.Logger {
+func newLogger() (*slog.Logger, error) {
 	level := slog.LevelInfo
 
 	if s := os.Getenv("LOG_LEVEL"); s != "" {
 		var v slog.Level
 		if err := v.UnmarshalText([]byte(s)); err != nil {
-			panic(fmt.Errorf("failed to parse LOG_LEVEL env variable: %w", err))
+			return nil, fmt.Errorf("failed to parse LOG_LEVEL env variable: %w", err)
 		}
 		level = v
 	}
@@ -83,10 +83,11 @@ func newLogger() *slog.Logger {
 		Level: level,
 	})
 
-	return slog.New(h)
+	return slog.New(h), nil
 }
 
-func newConfig() config {
+func newConfig() (config, error) {
+	var result config
 
 	laddr := "127.0.0.1"
 
@@ -137,44 +138,64 @@ func newConfig() config {
 		}
 	})
 
+	var lportUsed = true
 	switch cfg.net {
 	case "tcp", "tcp4", "tcp6":
 		cfg.addr = net.JoinHostPort(laddr, strconv.Itoa(lport))
 	case "unix", "unixpacket":
+		lportUsed = false
 		if lportSet {
-			panic("cannot specify lport on " + cfg.net + " network types")
+			return result, fmt.Errorf("cannot specify lport on %s network types", cfg.net)
 		}
 		cfg.addr = cfg.net + ":" + laddr
 	default:
-		panic("bad value for lnet: '" + cfg.net + "'")
-	}
-
-	if cport <= 0 {
-		panic("bad value for cport: " + strconv.Itoa(cport))
+		return result, fmt.Errorf("see help for valid lnet values: bad value")
 	}
 
 	if icaddr == "" {
-		panic("caddr cannot be empty")
+		return result, fmt.Errorf("caddr cannot be empty")
 	}
 
+	var cportUsed = true
 	switch cfg.cnet {
 	case "tcp", "tcp4", "tcp6":
 		cfg.caddr = net.JoinHostPort(icaddr, strconv.Itoa(cport))
 	case "unix", "unixpacket":
+		cportUsed = false
 		if cportSet {
-			panic("cannot specify cport on " + cfg.cnet + " network types")
+			return result, fmt.Errorf("cannot specify cport on %s network types", cfg.cnet)
 		}
 		cfg.caddr = cfg.cnet + ":" + icaddr
 	default:
-		panic("bad value for cnet: '" + cfg.cnet + "'")
+		return result, fmt.Errorf("see help for valid cnet values: bad value")
 	}
 
-	return cfg
+	if cportSet {
+		if cport <= 0 {
+			return result, fmt.Errorf("cport must be greater than zero: bad value %d", cport)
+		}
+	} else if cportUsed {
+		return result, fmt.Errorf("cport must be specified on %s network types", cfg.cnet)
+	}
+
+	if lportSet {
+		if lport < 0 {
+			return result, fmt.Errorf("lport must be greater than or equal to zero (note zero will make it random): bad value %d", cport)
+		}
+	} else if lportUsed {
+		return result, fmt.Errorf("lport must be specified on %s network types", cfg.net)
+	}
+
+	result = cfg
+	return result, nil
 }
 
 func main() {
 
-	logger := newLogger()
+	logger, err := newLogger()
+	if err != nil {
+		panic(fmt.Errorf("failed to create logger: %w", err))
+	}
 
 	var ctx context.Context
 	{
@@ -184,7 +205,14 @@ func main() {
 		ctx = v
 	}
 
-	cfg := newConfig()
+	cfg, err := newConfig()
+	if err != nil {
+		logger.LogAttrs(ctx, slog.LevelError,
+			"failed to create runtime configuration",
+			errAttr(err),
+		)
+		panic(err)
+	}
 
 	dialer := cfg.dialer()
 
