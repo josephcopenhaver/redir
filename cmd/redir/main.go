@@ -180,7 +180,7 @@ func newConfig() (config, error) {
 
 	if lportSet {
 		if lport < 0 {
-			return result, fmt.Errorf("lport must be greater than or equal to zero (note zero will make it random): bad value %d", cport)
+			return result, fmt.Errorf("lport must be greater than or equal to zero (note zero will make it random): bad value %d", lport)
 		}
 	} else if lportUsed {
 		return result, fmt.Errorf("lport must be specified on %s network types", cfg.net)
@@ -324,10 +324,12 @@ func serve(ctx context.Context, logger *slog.Logger, listener net.Listener, dial
 					return false
 				}
 
-				logger.LogAttrs(ctx, slog.LevelDebug,
-					"error accepting",
-					errAttr(err),
-				)
+				if logger.Enabled(ctx, slog.LevelDebug) {
+					logger.LogAttrs(ctx, slog.LevelDebug,
+						"error accepting",
+						errAttr(err),
+					)
+				}
 
 				return true
 			}
