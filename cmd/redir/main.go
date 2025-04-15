@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 type dialerFunc = func(context.Context) (net.Conn, error)
@@ -21,13 +22,23 @@ type dialerFunc = func(context.Context) (net.Conn, error)
 type config struct {
 	net, addr   string
 	cnet, caddr string
+	dialTimeout time.Duration
 }
 
 func (cfg *config) dialer() dialerFunc {
 	cnet, caddr := cfg.cnet, cfg.caddr
 
+	d := net.Dialer{
+		Timeout: cfg.dialTimeout,
+	}
+
 	return func(ctx context.Context) (net.Conn, error) {
-		return net.Dial(cnet, caddr)
+
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		return d.DialContext(ctx, cnet, caddr)
 	}
 }
 
@@ -92,13 +103,14 @@ func newConfig() (config, error) {
 	laddr := "127.0.0.1"
 
 	cfg := config{
-		cnet: "tcp",
-		net:  "tcp",
+		cnet:        "tcp",
+		net:         "tcp",
+		dialTimeout: 5 * time.Second,
 	}
 
-	var icaddr string
+	var icaddr, dialTimeout string
 	var lport, cport int
-	var lportSet, cportSet bool
+	var lportSet, cportSet, dialTimeoutSet bool
 
 	usage := func(_ string) error {
 		fmt.Println("")
@@ -126,6 +138,7 @@ func newConfig() (config, error) {
 	flag.BoolFunc("help", "help", usage)
 	flag.BoolFunc("usage", "help", usage)
 	flag.BoolFunc("h", "help", usage)
+	flag.StringVar(&dialTimeout, "dial-timeout", cfg.dialTimeout.String(), "see docs at https://pkg.go.dev/time#ParseDuration")
 
 	flag.Parse()
 
@@ -135,6 +148,8 @@ func newConfig() (config, error) {
 			lportSet = true
 		case "cport":
 			cportSet = true
+		case "dial-timeout":
+			dialTimeoutSet = true
 		}
 	})
 
@@ -184,6 +199,19 @@ func newConfig() (config, error) {
 		}
 	} else if lportUsed {
 		return result, fmt.Errorf("lport must be specified on %s network types", cfg.net)
+	}
+
+	if dialTimeoutSet {
+		v, err := time.ParseDuration(dialTimeout)
+		if err != nil {
+			return result, fmt.Errorf("invalid dial timeout: %w", err)
+		}
+
+		cfg.dialTimeout = v
+	}
+
+	if cfg.dialTimeout <= 0 {
+		return result, errors.New("invalid dial timeout: must be greater than zero")
 	}
 
 	result = cfg
