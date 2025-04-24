@@ -278,16 +278,27 @@ func closeConnFunc(con net.Conn) func() {
 	})
 }
 
-func closeListenerFunc(listener net.Listener) func() {
+func closeListenerFunc(ctx context.Context, logger *slog.Logger, listener net.Listener) func() {
 	return sync.OnceFunc(func() {
-		ignoredErr := listener.Close()
-		_ = ignoredErr
+		if err := listener.Close(); err != nil {
+			logger.LogAttrs(ctx, slog.LevelError,
+				"listener failed to close",
+				slog.String("addr", listener.Addr().String()),
+				errAttr(err),
+			)
+			return
+		}
+
+		logger.LogAttrs(ctx, slog.LevelWarn,
+			"listener closed",
+			slog.String("addr", listener.Addr().String()),
+		)
 	})
 }
 
 // serve starts goroutines to handle requests coming in to the listener.
 func serve(ctx context.Context, logger *slog.Logger, listener net.Listener, dialer dialerFunc) {
-	closeListener := closeListenerFunc(listener)
+	closeListener := closeListenerFunc(ctx, logger, listener)
 	defer closeListener()
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -382,6 +393,10 @@ func serve(ctx context.Context, logger *slog.Logger, listener net.Listener, dial
 	defer wg.Wait()
 	defer closeListener()
 
+	logger.LogAttrs(ctx, slog.LevelInfo,
+		"ready",
+	)
+
 	<-ctx.Done()
 
 	logger.LogAttrs(ctx, slog.LevelWarn,
@@ -407,8 +422,7 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 		defer close(fromChan)
 		defer closeFrom()
 
-		_, err := io.Copy(to, from)
-		if err != nil && logger.Enabled(ctx, slog.LevelDebug) {
+		if _, err := io.Copy(to, from); err != nil && logger.Enabled(ctx, slog.LevelDebug) {
 			logger.LogAttrs(ctx, slog.LevelDebug,
 				"copy errored",
 				errAttr(err),
@@ -424,8 +438,7 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 		defer close(toChan)
 		defer closeTo()
 
-		_, err := io.Copy(from, to)
-		if err != nil && logger.Enabled(ctx, slog.LevelDebug) {
+		if _, err := io.Copy(from, to); err != nil && logger.Enabled(ctx, slog.LevelDebug) {
 			logger.LogAttrs(ctx, slog.LevelDebug,
 				"copy errored",
 				errAttr(err),
@@ -466,6 +479,11 @@ func errAttr(err error) slog.Attr {
 	return slog.Any("error", err)
 }
 
+// done is prematurely optimized for ~5k goroutines all trying to check the same ctx at the same time
+//
+// see https://stackoverflow.com/questions/57562606/why-does-sync-mutex-largely-drop-performance-when-goroutine-contention-is-more-t
+//
+// at lower scales `ctx.Err() != nil` is more performant
 func done(d <-chan struct{}) bool {
 	select {
 	case <-d:
