@@ -21,7 +21,7 @@ import (
 
 // build-time vars
 var (
-	version = "v1.1.9"
+	version = "v1.2.0"
 )
 
 type dialerFunc = func(context.Context) (net.Conn, error)
@@ -566,7 +566,7 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 }
 
 func allowedNets() []string {
-	return []string{"tcp", "tcp4", "tcp6", "unix", "unixpacket"}
+	return []string{"tcp", "tcp4", "tcp6", "unix"}
 }
 
 func errAttr(err error) slog.Attr {
