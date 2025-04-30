@@ -21,7 +21,7 @@ import (
 
 // build-time vars
 var (
-	version = "v1.1.8"
+	version = "v1.1.9"
 )
 
 type dialerFunc = func(context.Context) (net.Conn, error)
@@ -423,13 +423,21 @@ func serve(ctx context.Context, logger *slog.Logger, listener net.Listener, dial
 
 func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from net.Conn, closeFrom func()) {
 
-	logger.LogAttrs(ctx, slog.LevelDebug,
-		"connection starting",
-	)
+	debug := logger.Enabled(ctx, slog.LevelDebug)
 
-	defer logger.LogAttrs(ctx, slog.LevelDebug,
-		"connection closed",
-	)
+	if debug {
+		logger.LogAttrs(ctx, slog.LevelDebug,
+			"connection starting",
+			slog.String("from_remote", addrToStr(from.RemoteAddr())),
+			slog.String("from_local", addrToStr(from.LocalAddr())),
+		)
+
+		defer logger.LogAttrs(ctx, slog.LevelDebug,
+			"connection closed",
+			slog.String("from_remote", addrToStr(from.RemoteAddr())),
+			slog.String("from_local", addrToStr(from.LocalAddr())),
+		)
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -439,6 +447,8 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 		logger.LogAttrs(ctx, slog.LevelError,
 			"failed to dial",
 			errAttr(err),
+			slog.String("from_remote", addrToStr(from.RemoteAddr())),
+			slog.String("from_local", addrToStr(from.LocalAddr())),
 		)
 		return
 	}
@@ -459,25 +469,40 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 		defer duplexWG.Wait()
 		defer duplexWG.Done()
 
-		logger.LogAttrs(ctx, slog.LevelDebug,
-			"will close duplex",
-			slog.String("operation", "from -> to"),
-		)
+		if debug {
+			logger.LogAttrs(ctx, slog.LevelDebug,
+				"transfer starting",
+				slog.String("from_remote", addrToStr(from.RemoteAddr())),
+				slog.String("from_local", addrToStr(from.LocalAddr())),
+				slog.String("operation", "from -> to"),
+			)
+
+			defer logger.LogAttrs(ctx, slog.LevelDebug,
+				"transfer closed",
+				slog.String("from_remote", addrToStr(from.RemoteAddr())),
+				slog.String("from_local", addrToStr(from.LocalAddr())),
+				slog.String("operation", "from -> to"),
+			)
+		}
 
 		defer duplexCloser(to, from)()
 
-		defer logger.LogAttrs(ctx, slog.LevelDebug,
-			"closing duplex",
-			slog.String("operation", "from -> to"),
-		)
-
-		if _, err := io.Copy(to, from); err != nil && logger.Enabled(ctx, slog.LevelDebug) {
-			logger.LogAttrs(ctx, slog.LevelDebug,
-				"copy errored",
-				errAttr(err),
+		if debug {
+			defer logger.LogAttrs(ctx, slog.LevelDebug,
+				"transfer closing",
+				slog.String("from_remote", addrToStr(from.RemoteAddr())),
+				slog.String("from_local", addrToStr(from.LocalAddr())),
 				slog.String("operation", "from -> to"),
-				slog.String("from_remote_addr", addrToStr(from.RemoteAddr())),
-				slog.String("from_local_addr", addrToStr(from.LocalAddr())),
+			)
+		}
+
+		if _, err := io.Copy(to, from); err != nil && debug {
+			logger.LogAttrs(ctx, slog.LevelDebug,
+				"transfer errored",
+				errAttr(err),
+				slog.String("from_remote", addrToStr(from.RemoteAddr())),
+				slog.String("from_local", addrToStr(from.LocalAddr())),
+				slog.String("operation", "from -> to"),
 			)
 		}
 	}()
@@ -488,25 +513,40 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 		defer duplexWG.Wait()
 		defer duplexWG.Done()
 
-		logger.LogAttrs(ctx, slog.LevelDebug,
-			"will close duplex",
-			slog.String("operation", "from <- to"),
-		)
+		if debug {
+			logger.LogAttrs(ctx, slog.LevelDebug,
+				"transfer starting",
+				slog.String("from_remote", addrToStr(from.RemoteAddr())),
+				slog.String("from_local", addrToStr(from.LocalAddr())),
+				slog.String("operation", "from <- to"),
+			)
+
+			defer logger.LogAttrs(ctx, slog.LevelDebug,
+				"transfer closed",
+				slog.String("from_remote", addrToStr(from.RemoteAddr())),
+				slog.String("from_local", addrToStr(from.LocalAddr())),
+				slog.String("operation", "from <- to"),
+			)
+		}
 
 		defer duplexCloser(from, to)()
 
-		defer logger.LogAttrs(ctx, slog.LevelDebug,
-			"closing duplex",
-			slog.String("operation", "from <- to"),
-		)
-
-		if _, err := io.Copy(from, to); err != nil && logger.Enabled(ctx, slog.LevelDebug) {
-			logger.LogAttrs(ctx, slog.LevelDebug,
-				"copy errored",
-				errAttr(err),
+		if debug {
+			defer logger.LogAttrs(ctx, slog.LevelDebug,
+				"transfer closing",
+				slog.String("from_remote", addrToStr(from.RemoteAddr())),
+				slog.String("from_local", addrToStr(from.LocalAddr())),
 				slog.String("operation", "from <- to"),
-				slog.String("from_remote_addr", addrToStr(from.RemoteAddr())),
-				slog.String("from_local_addr", addrToStr(from.LocalAddr())),
+			)
+		}
+
+		if _, err := io.Copy(from, to); err != nil && debug {
+			logger.LogAttrs(ctx, slog.LevelDebug,
+				"transfer errored",
+				errAttr(err),
+				slog.String("from_remote", addrToStr(from.RemoteAddr())),
+				slog.String("from_local", addrToStr(from.LocalAddr())),
+				slog.String("operation", "from <- to"),
 			)
 		}
 	}()
@@ -514,9 +554,13 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 	defer closeTo()
 	defer closeFrom()
 
-	defer logger.LogAttrs(ctx, slog.LevelDebug,
-		"connection closing",
-	)
+	if debug {
+		defer logger.LogAttrs(ctx, slog.LevelDebug,
+			"connection closing",
+			slog.String("from_remote", addrToStr(from.RemoteAddr())),
+			slog.String("from_local", addrToStr(from.LocalAddr())),
+		)
+	}
 
 	<-ctx.Done()
 }
