@@ -17,6 +17,13 @@ import (
 	"time"
 )
 
+// note, build-time vars might move to their own ./internal/ sub package in the future
+
+// build-time vars
+var (
+	version = "v1.1.8"
+)
+
 type dialerFunc = func(context.Context) (net.Conn, error)
 
 type config struct {
@@ -112,7 +119,7 @@ func newConfig() (config, error) {
 	var lport, cport int
 	var lportSet, cportSet, dialTimeoutSet bool
 
-	usage := func(_ string) error {
+	usage := func(string) error {
 		fmt.Println("")
 		fmt.Println("#############")
 		fmt.Println("##         ##")
@@ -129,16 +136,26 @@ func newConfig() (config, error) {
 		return nil
 	}
 
+	printVersion := func(string) error {
+		fmt.Println(version)
+
+		os.Exit(0)
+
+		return nil
+	}
+
 	flag.StringVar(&cfg.net, "lnet", cfg.net, "listen network type, must be one of: "+strings.Join(allowedNets(), ", "))
 	flag.StringVar(&laddr, "laddr", laddr, "address to liston on")
 	flag.IntVar(&lport, "lport", lport, "port to listen on")
 	flag.StringVar(&cfg.cnet, "cnet", cfg.cnet, "connect to network type, must be one of: "+strings.Join(allowedNets(), ", "))
 	flag.StringVar(&icaddr, "caddr", icaddr, "address to connect to")
 	flag.IntVar(&cport, "cport", cport, "port to connect to")
+	flag.StringVar(&dialTimeout, "dial-timeout", cfg.dialTimeout.String(), "see docs at https://pkg.go.dev/time#ParseDuration")
 	flag.BoolFunc("help", "help", usage)
 	flag.BoolFunc("usage", "help", usage)
 	flag.BoolFunc("h", "help", usage)
-	flag.StringVar(&dialTimeout, "dial-timeout", cfg.dialTimeout.String(), "see docs at https://pkg.go.dev/time#ParseDuration")
+	flag.BoolFunc("v", "version", printVersion)
+	flag.BoolFunc("version", "version", printVersion)
 
 	flag.Parse()
 
@@ -406,6 +423,17 @@ func serve(ctx context.Context, logger *slog.Logger, listener net.Listener, dial
 
 func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from net.Conn, closeFrom func()) {
 
+	logger.LogAttrs(ctx, slog.LevelDebug,
+		"connection starting",
+	)
+
+	defer logger.LogAttrs(ctx, slog.LevelDebug,
+		"connection closed",
+	)
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	to, err := dialer(ctx)
 	if err != nil {
 		logger.LogAttrs(ctx, slog.LevelError,
@@ -417,10 +445,35 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 	closeTo := closeConnFunc(to)
 	defer closeTo()
 
-	fromChan := make(chan struct{})
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
+	var duplexWG sync.WaitGroup
+	duplexWG.Add(2)
+
+	wg.Add(2)
+
 	go func() {
-		defer close(fromChan)
-		defer closeFrom()
+		defer wg.Done()
+		defer cancel()
+		defer duplexWG.Wait()
+		defer duplexWG.Done()
+
+		if n, f := duplexCloser(to, from); f != nil {
+			logger.LogAttrs(ctx, slog.LevelDebug,
+				"will close duplex",
+				slog.String("operation", "from -> to"),
+				slog.Int("count", n),
+			)
+
+			defer f()
+
+			defer logger.LogAttrs(ctx, slog.LevelDebug,
+				"closing duplex",
+				slog.String("operation", "from -> to"),
+				slog.Int("count", n),
+			)
+		}
 
 		if _, err := io.Copy(to, from); err != nil && logger.Enabled(ctx, slog.LevelDebug) {
 			logger.LogAttrs(ctx, slog.LevelDebug,
@@ -433,10 +486,27 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 		}
 	}()
 
-	toChan := make(chan struct{})
 	go func() {
-		defer close(toChan)
-		defer closeTo()
+		defer wg.Done()
+		defer cancel()
+		defer duplexWG.Wait()
+		defer duplexWG.Done()
+
+		if n, f := duplexCloser(from, to); f != nil {
+			logger.LogAttrs(ctx, slog.LevelDebug,
+				"will close duplex",
+				slog.String("operation", "from <- to"),
+				slog.Int("count", n),
+			)
+
+			defer f()
+
+			defer logger.LogAttrs(ctx, slog.LevelDebug,
+				"closing duplex",
+				slog.String("operation", "from <- to"),
+				slog.Int("count", n),
+			)
+		}
 
 		if _, err := io.Copy(from, to); err != nil && logger.Enabled(ctx, slog.LevelDebug) {
 			logger.LogAttrs(ctx, slog.LevelDebug,
@@ -449,26 +519,14 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 		}
 	}()
 
-	chans := [](<-chan struct{}){fromChan, toChan}
-
-	defer func() {
-		for _, v := range chans {
-			<-v
-		}
-	}()
-
 	defer closeTo()
 	defer closeFrom()
 
-	ctxChan := ctx.Done()
+	defer logger.LogAttrs(ctx, slog.LevelDebug,
+		"connection closing",
+	)
 
-	select {
-	case <-chans[0]:
-		chans = chans[1:]
-	case <-chans[1]:
-		chans = chans[:1]
-	case <-ctxChan:
-	}
+	<-ctx.Done()
 }
 
 func allowedNets() []string {
@@ -499,4 +557,51 @@ func addrToStr(addr net.Addr) string {
 	}
 
 	return addr.String()
+}
+
+func duplexCloser(dst, src net.Conn) (int, func()) {
+	var result func()
+	var n int
+
+	if v, ok := src.(*net.TCPConn); ok {
+		n++
+		result = func() {
+			ignoredErr := v.CloseRead()
+			_ = ignoredErr
+		}
+	} else if v, ok := src.(*net.UnixConn); ok {
+		n++
+		result = func() {
+			ignoredErr := v.CloseRead()
+			_ = ignoredErr
+		}
+	}
+
+	{
+		var closeW func() error
+		if v, ok := dst.(*net.TCPConn); ok {
+			n++
+			closeW = v.CloseWrite
+		} else if v, ok := dst.(*net.UnixConn); ok {
+			n++
+			closeW = v.CloseWrite
+		}
+
+		if closeW != nil {
+			if f := result; f != nil {
+				result = func() {
+					defer f()
+					ignoredErr := closeW()
+					_ = ignoredErr
+				}
+			} else {
+				result = func() {
+					ignoredErr := closeW()
+					_ = ignoredErr
+				}
+			}
+		}
+	}
+
+	return n, result
 }
