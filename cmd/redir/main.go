@@ -580,14 +580,13 @@ func duplexCloser(dst, src net.Conn) (int, func()) {
 	{
 		var closeW func() error
 		if v, ok := dst.(*net.TCPConn); ok {
-			n++
 			closeW = v.CloseWrite
 		} else if v, ok := dst.(*net.UnixConn); ok {
-			n++
 			closeW = v.CloseWrite
 		}
 
 		if closeW != nil {
+			n++
 			if f := result; f != nil {
 				result = func() {
 					defer f()
