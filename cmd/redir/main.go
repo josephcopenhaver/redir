@@ -485,7 +485,7 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 			)
 		}
 
-		defer duplexCloser(to, from)()
+		defer closeDuplex(to, from)
 
 		if debug {
 			defer logger.LogAttrs(ctx, slog.LevelDebug,
@@ -529,7 +529,7 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 			)
 		}
 
-		defer duplexCloser(from, to)()
+		defer closeDuplex(from, to)
 
 		if debug {
 			defer logger.LogAttrs(ctx, slog.LevelDebug,
@@ -595,7 +595,7 @@ func addrToStr(addr net.Addr) string {
 	return addr.String()
 }
 
-func duplexCloser(dst, src net.Conn) func() {
+func closeDuplex(dst, src net.Conn) {
 
 	var closeRead func() error
 	if v, ok := src.(interface{ CloseRead() error }); ok {
@@ -611,12 +611,10 @@ func duplexCloser(dst, src net.Conn) func() {
 		panic("dst not a duplex connection type implementing CloseWrite()")
 	}
 
-	return func() {
-		// error are intentionally ignored here
-		//
-		// if they fail the higher order Close operations will be called
+	// errors are intentionally ignored here
+	//
+	// if they fail the higher order Close operations will be called
 
-		defer closeRead()
-		closeWrite()
-	}
+	defer closeRead()
+	closeWrite()
 }
