@@ -459,21 +459,17 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 		defer duplexWG.Wait()
 		defer duplexWG.Done()
 
-		if n, f := duplexCloser(to, from); f != nil {
-			logger.LogAttrs(ctx, slog.LevelDebug,
-				"will close duplex",
-				slog.String("operation", "from -> to"),
-				slog.Int("count", n),
-			)
+		logger.LogAttrs(ctx, slog.LevelDebug,
+			"will close duplex",
+			slog.String("operation", "from -> to"),
+		)
 
-			defer f()
+		defer duplexCloser(to, from)()
 
-			defer logger.LogAttrs(ctx, slog.LevelDebug,
-				"closing duplex",
-				slog.String("operation", "from -> to"),
-				slog.Int("count", n),
-			)
-		}
+		defer logger.LogAttrs(ctx, slog.LevelDebug,
+			"closing duplex",
+			slog.String("operation", "from -> to"),
+		)
 
 		if _, err := io.Copy(to, from); err != nil && logger.Enabled(ctx, slog.LevelDebug) {
 			logger.LogAttrs(ctx, slog.LevelDebug,
@@ -492,21 +488,17 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 		defer duplexWG.Wait()
 		defer duplexWG.Done()
 
-		if n, f := duplexCloser(from, to); f != nil {
-			logger.LogAttrs(ctx, slog.LevelDebug,
-				"will close duplex",
-				slog.String("operation", "from <- to"),
-				slog.Int("count", n),
-			)
+		logger.LogAttrs(ctx, slog.LevelDebug,
+			"will close duplex",
+			slog.String("operation", "from <- to"),
+		)
 
-			defer f()
+		defer duplexCloser(from, to)()
 
-			defer logger.LogAttrs(ctx, slog.LevelDebug,
-				"closing duplex",
-				slog.String("operation", "from <- to"),
-				slog.Int("count", n),
-			)
-		}
+		defer logger.LogAttrs(ctx, slog.LevelDebug,
+			"closing duplex",
+			slog.String("operation", "from <- to"),
+		)
 
 		if _, err := io.Copy(from, to); err != nil && logger.Enabled(ctx, slog.LevelDebug) {
 			logger.LogAttrs(ctx, slog.LevelDebug,
@@ -559,48 +551,28 @@ func addrToStr(addr net.Addr) string {
 	return addr.String()
 }
 
-func duplexCloser(dst, src net.Conn) (int, func()) {
-	var result func()
-	var n int
+func duplexCloser(dst, src net.Conn) func() {
 
-	if v, ok := src.(*net.TCPConn); ok {
-		n++
-		result = func() {
-			ignoredErr := v.CloseRead()
-			_ = ignoredErr
-		}
-	} else if v, ok := src.(*net.UnixConn); ok {
-		n++
-		result = func() {
-			ignoredErr := v.CloseRead()
-			_ = ignoredErr
-		}
+	var closeRead func() error
+	if v, ok := src.(interface{ CloseRead() error }); ok {
+		closeRead = v.CloseRead
+	} else {
+		panic("src not a duplex connection type implementing CloseRead()")
 	}
 
-	{
-		var closeW func() error
-		if v, ok := dst.(*net.TCPConn); ok {
-			closeW = v.CloseWrite
-		} else if v, ok := dst.(*net.UnixConn); ok {
-			closeW = v.CloseWrite
-		}
-
-		if closeW != nil {
-			n++
-			if f := result; f != nil {
-				result = func() {
-					defer f()
-					ignoredErr := closeW()
-					_ = ignoredErr
-				}
-			} else {
-				result = func() {
-					ignoredErr := closeW()
-					_ = ignoredErr
-				}
-			}
-		}
+	var closeWrite func() error
+	if v, ok := dst.(interface{ CloseWrite() error }); ok {
+		closeWrite = v.CloseWrite
+	} else {
+		panic("dst not a duplex connection type implementing CloseWrite()")
 	}
 
-	return n, result
+	return func() {
+		// error are intentionally ignored here
+		//
+		// if they fail the higher order Close operations will be called
+
+		defer closeRead()
+		closeWrite()
+	}
 }
