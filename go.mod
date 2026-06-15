@@ -1,3 +1,3 @@
 module github.com/josephcopenhaver/redir
 
-go 1.22.3
+go 1.25

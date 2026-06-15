@@ -17,24 +17,27 @@ Just a golang clone of the basic packet forwarding capabilities of [redir](https
 
 
   -caddr string
-    	address to connect to
+        address to connect to
   -cnet string
-    	connect to network type, must be one of: tcp, tcp4, tcp6, unix, unixpacket (default "tcp")
+        connect to network type, must be one of: tcp, tcp4, tcp6, unix (default "tcp")
   -cport int
-    	port to connect to
+        port to connect to
   -dial-timeout string
-    	see docs at https://pkg.go.dev/time#ParseDuration (default "5s")
-  -h	help
+        see docs at https://pkg.go.dev/time#ParseDuration (default "5s")
+  -h    help
   -help
-    	help
+        help
   -laddr string
-    	address to liston on (default "127.0.0.1")
+        address to liston on (default "127.0.0.1")
   -lnet string
-    	listen network type, must be one of: tcp, tcp4, tcp6, unix, unixpacket (default "tcp")
+        listen network type, must be one of: tcp, tcp4, tcp6, unix (default "tcp")
   -lport int
-    	port to listen on
+        port to listen on
   -usage
-    	help
+        help
+  -v    version
+  -version
+        version
 00:~ $
 ```
 

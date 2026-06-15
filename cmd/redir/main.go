@@ -174,12 +174,12 @@ func newConfig() (config, error) {
 	switch cfg.net {
 	case "tcp", "tcp4", "tcp6":
 		cfg.addr = net.JoinHostPort(laddr, strconv.Itoa(lport))
-	case "unix", "unixpacket":
+	case "unix":
 		lportUsed = false
 		if lportSet {
 			return result, fmt.Errorf("cannot specify lport on %s network types", cfg.net)
 		}
-		cfg.addr = cfg.net + ":" + laddr
+		cfg.addr = laddr
 	default:
 		return result, fmt.Errorf("see help for valid lnet values: bad value")
 	}
@@ -192,12 +192,12 @@ func newConfig() (config, error) {
 	switch cfg.cnet {
 	case "tcp", "tcp4", "tcp6":
 		cfg.caddr = net.JoinHostPort(icaddr, strconv.Itoa(cport))
-	case "unix", "unixpacket":
+	case "unix":
 		cportUsed = false
 		if cportSet {
 			return result, fmt.Errorf("cannot specify cport on %s network types", cfg.cnet)
 		}
-		cfg.caddr = cfg.cnet + ":" + icaddr
+		cfg.caddr = icaddr
 	default:
 		return result, fmt.Errorf("see help for valid cnet values: bad value")
 	}
@@ -261,10 +261,12 @@ func main() {
 
 	dialer := cfg.dialer()
 
-	logger.LogAttrs(ctx, slog.LevelInfo,
-		"starting listener",
-		slog.String("addr", cfg.addr),
-	)
+	if level := slog.LevelInfo; logger.Enabled(ctx, level) {
+		logger.LogAttrs(ctx, level,
+			"starting listener",
+			slog.String("addr", netAddrStr(cfg.net, cfg.addr)),
+		)
+	}
 
 	defer func() {
 		logger.LogAttrs(ctx, slog.LevelWarn,
@@ -298,18 +300,23 @@ func closeConnFunc(con net.Conn) func() {
 func closeListenerFunc(ctx context.Context, logger *slog.Logger, listener net.Listener) func() {
 	return sync.OnceFunc(func() {
 		if err := listener.Close(); err != nil {
-			logger.LogAttrs(ctx, slog.LevelError,
-				"listener failed to close",
-				slog.String("addr", listener.Addr().String()),
-				errAttr(err),
-			)
+			if level := slog.LevelError; logger.Enabled(ctx, level) {
+				logger.LogAttrs(ctx, level,
+					"listener failed to close",
+					slog.String("addr", listenerAddrStr(listener)),
+					errAttr(err),
+				)
+			}
+
 			return
 		}
 
-		logger.LogAttrs(ctx, slog.LevelWarn,
-			"listener closed",
-			slog.String("addr", listener.Addr().String()),
-		)
+		if level := slog.LevelWarn; logger.Enabled(ctx, level) {
+			logger.LogAttrs(ctx, level,
+				"listener closed",
+				slog.String("addr", listenerAddrStr(listener)),
+			)
+		}
 	})
 }
 
@@ -321,10 +328,12 @@ func serve(ctx context.Context, logger *slog.Logger, listener net.Listener, dial
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	logger.LogAttrs(ctx, slog.LevelInfo,
-		"starting handlers",
-		slog.String("addr", listener.Addr().String()),
-	)
+	if level := slog.LevelInfo; logger.Enabled(ctx, level) {
+		logger.LogAttrs(ctx, level,
+			"starting handlers",
+			slog.String("addr", listenerAddrStr(listener)),
+		)
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -454,6 +463,15 @@ func handleCon(ctx context.Context, logger *slog.Logger, dialer dialerFunc, from
 	}
 	closeTo := closeConnFunc(to)
 	defer closeTo()
+
+	// defer closeTo is called twice in this function on purpose:
+	// - cleanup scheduled immediately after allocation point
+	// - cleanup before the defer'd wg.Wait call
+	//
+	// both are valid and load bearing - one from a defense-in-depth pattern
+	// strategy and the other in a real stop-that-worker fashion.
+	//
+	// If you find it worth optimizing open a PR with data if you wish.
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -617,4 +635,17 @@ func closeDuplex(dst, src net.Conn) {
 
 	defer closeRead()
 	closeWrite()
+}
+
+func listenerAddrStr(v interface{ Addr() net.Addr }) string {
+	a := v.Addr()
+	return netAddrStr(a.Network(), a.String())
+}
+
+func netAddrStr(network, addr string) string {
+	if network != "unix" {
+		return addr
+	}
+
+	return "unix:" + addr
 }
