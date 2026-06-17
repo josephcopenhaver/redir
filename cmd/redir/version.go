@@ -1,6 +1,5 @@
 package main
 
-// build-time vars
-var (
+const (
 	version = "v1.2.2"
 )

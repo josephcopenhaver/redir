@@ -70,7 +70,7 @@ func Dist() error {
 	return nil
 }
 
-var versionLineReg = regexp.MustCompile(`^\s*version\s*=\s*"([^"]+)"\s*(?://.*)?$`)
+var versionLineReg = regexp.MustCompile(`^\s*(?:(?:const|var)\s+)?version\s*=\s*"([^"]+)"\s*(?://.*)?$`)
 
 func version() string {
 	f, err := os.Open("./cmd/redir/version.go")

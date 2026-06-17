@@ -7,4 +7,5 @@
 
 /redir
 .bak
+.DS_Store
 *.bak
