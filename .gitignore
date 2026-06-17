@@ -1,5 +1,10 @@
 /main
 /build
 /bin
+/dist
 /testresults
 /vendor
+
+/redir
+.bak
+*.bak

@@ -17,13 +17,6 @@ import (
 	"time"
 )
 
-// note, build-time vars might move to their own ./internal/ sub package in the future
-
-// build-time vars
-var (
-	version = "v1.2.0"
-)
-
 type dialerFunc = func(context.Context) (net.Conn, error)
 
 type config struct {
